@@ -3,6 +3,14 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
+# Try to import lightweight LLM first
+try:
+    from lightweight_llm import LightweightLLM
+    LIGHTWEIGHT_LLM_AVAILABLE = True
+except ImportError:
+    LIGHTWEIGHT_LLM_AVAILABLE = False
+
+# Try to import llama-cpp-python
 try:
     from llama_cpp import Llama
     LLAMA_CPP_AVAILABLE = True
@@ -14,33 +22,66 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class LLMInterface:
-    def __init__(self, model_path: Optional[str] = None, **kwargs):
+    def __init__(self, model_path: Optional[str] = None, use_lightweight: bool = True, **kwargs):
         """
-        Initialize the LLM interface.
+        Initialize the LLM interface with multiple options.
         
         Args:
-            model_path: Path to the GGUF model file
+            model_path: Path to GGUF model file (for llama-cpp-python)
+            use_lightweight: Whether to use lightweight transformers model
             **kwargs: Additional arguments for Llama initialization
         """
         self.model_path = model_path
+        self.use_lightweight = use_lightweight
         self.llm = None
+        self.lightweight_llm = None
         
-        # Default model parameters
+        # Default model parameters for llama-cpp-python
         self.default_params = {
-            "n_ctx": 4096,  # Context window
-            "n_batch": 512,  # Batch size
-            "n_threads": 4,  # Number of threads
-            "n_gpu_layers": 0,  # GPU layers (0 for CPU-only)
+            "n_ctx": 4096,
+            "n_batch": 512,
+            "n_threads": 4,
+            "n_gpu_layers": 0,
             "verbose": False
         }
-        
-        # Update with provided kwargs
         self.default_params.update(kwargs)
         
-        if model_path and LLAMA_CPP_AVAILABLE:
-            self._load_model()
-        elif not LLAMA_CPP_AVAILABLE:
-            logger.warning("Using fallback text generation. Install llama-cpp-python for better results.")
+        # Try to initialize the best available option
+        self._initialize_llm()
+    
+    def _initialize_llm(self):
+        """Initialize the best available LLM option."""
+        
+        # Option 1: Try lightweight transformers model (recommended)
+        if self.use_lightweight and LIGHTWEIGHT_LLM_AVAILABLE:
+            try:
+                logger.info("Initializing lightweight transformers model...")
+                self.lightweight_llm = LightweightLLM("distilgpt2")  # Start with fastest
+                
+                if self.lightweight_llm.is_available():
+                    logger.info("✅ Lightweight model loaded successfully!")
+                    return
+                else:
+                    logger.warning("Lightweight model failed to load")
+                    self.lightweight_llm = None
+                    
+            except Exception as e:
+                logger.error(f"Failed to load lightweight model: {e}")
+                self.lightweight_llm = None
+        
+        # Option 2: Try llama-cpp-python if model file exists
+        if self.model_path and LLAMA_CPP_AVAILABLE:
+            try:
+                self._load_model()
+                if self.llm:
+                    return
+            except Exception as e:
+                logger.error(f"Failed to load llama-cpp model: {e}")
+        
+        # If no model loaded, provide informative message
+        if not self.is_available():
+            logger.warning("No LLM model loaded. Using fallback responses.")
+            self._log_setup_instructions()
     
     def _load_model(self):
         """Load the LLM model."""
@@ -80,7 +121,7 @@ class LLMInterface:
         To use a local LLM, please download a GGUF model file manually:
         
         1. Visit: https://huggingface.co/models?library=gguf
-        2. Search for models like 'llama-2-7b-chat' or 'mistral-7b'
+        2. Search for models like 'llama-2-7B-Chat' or 'mistral-7B'
         3. Download a .gguf file (Q4_K_M quantization is recommended)
         4. Place it in the 'models' directory as: {model_path}
         5. Restart the application
@@ -93,6 +134,12 @@ class LLMInterface:
         
         return str(model_path)
     
+    def _log_setup_instructions(self):
+        """Log setup instructions for users."""
+        logger.info("💡 To enable better LLM responses:")
+        logger.info("   Option 1 (Lightweight): pip install torch transformers")
+        logger.info("   Option 2 (Advanced): Download GGUF model + pip install llama-cpp-python")
+    
     def generate_response(
         self, 
         prompt: str, 
@@ -102,7 +149,7 @@ class LLMInterface:
         stop: Optional[List[str]] = None
     ) -> str:
         """
-        Generate a response using the LLM.
+        Generate a response using the best available LLM.
         
         Args:
             prompt: Input prompt
@@ -114,26 +161,36 @@ class LLMInterface:
         Returns:
             Generated response
         """
-        if self.llm is None:
-            return self._fallback_response(prompt)
         
-        try:
-            # Generate response
-            response = self.llm(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                stop=stop or ["Human:", "User:", "\n\n"],
-                echo=False
-            )
-            
-            generated_text = response["choices"][0]["text"].strip()
-            return generated_text
-            
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return self._fallback_response(prompt)
+        # Use lightweight model if available
+        if self.lightweight_llm and self.lightweight_llm.is_available():
+            try:
+                return self.lightweight_llm.generate_response(
+                    prompt=prompt,
+                    max_length=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p
+                )
+            except Exception as e:
+                logger.error(f"Lightweight model error: {e}")
+        
+        # Fall back to llama-cpp-python if available
+        if self.llm:
+            try:
+                response = self.llm(
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop=stop or ["Human:", "User:", "\n\n"],
+                    echo=False
+                )
+                return response["choices"][0]["text"].strip()
+            except Exception as e:
+                logger.error(f"Llama-cpp model error: {e}")
+        
+        # Final fallback
+        return self._fallback_response(prompt)
     
     def _fallback_response(self, prompt: str) -> str:
         """
@@ -145,15 +202,23 @@ class LLMInterface:
         Returns:
             Fallback response
         """
-        return """I apologize, but the local LLM is not currently available. 
-        
-To enable local LLM functionality:
-1. Download a GGUF model file (e.g., Llama-2-7B-Chat)
-2. Place it in the 'models' directory
-3. Update the model path in the configuration
-4. Restart the application
+        return """I can see your query, but I need a language model to provide detailed responses.
 
-For now, I can see your query but cannot provide a detailed response based on the documents."""
+To enable better responses:
+
+🚀 **Lightweight Option (Recommended):**
+```bash
+pip install torch transformers
+```
+Then restart the backend.
+
+🔧 **Advanced Option:**
+1. Download a GGUF model (e.g., Llama-2-7B-Chat)
+2. Place it in the 'models' directory
+3. Install: pip install llama-cpp-python
+4. Restart the backend
+
+The lightweight option works great for most use cases and is much faster to set up!"""
     
     def create_rag_prompt(self, query: str, context_chunks: List[str], max_context_length: int = 2000) -> str:
         """
@@ -170,15 +235,17 @@ For now, I can see your query but cannot provide a detailed response based on th
         # Combine context chunks
         context = "\n\n".join(context_chunks)
         
-        # Truncate context if too long
+        # Adjust context length based on model type
+        if self.lightweight_llm:
+            max_context_length = 800  # Shorter for lightweight models
+        
         if len(context) > max_context_length:
             context = context[:max_context_length] + "..."
         
-        # Create RAG prompt
-        rag_prompt = f"""You are a helpful assistant that answers questions based on the provided context. 
-Use only the information from the context to answer the question. If the answer is not in the context, say so.
+        # Simple, effective prompt
+        rag_prompt = f"""Based on the following information, answer the question accurately.
 
-Context:
+Information:
 {context}
 
 Question: {query}
@@ -206,22 +273,52 @@ Answer:"""
         Returns:
             Generated answer
         """
-        # Create RAG prompt
-        prompt = self.create_rag_prompt(query, context_chunks)
         
-        # Generate response
+        # Use lightweight model's RAG method if available
+        if self.lightweight_llm and self.lightweight_llm.is_available():
+            try:
+                return self.lightweight_llm.answer_query(query, context_chunks, max_tokens)
+            except Exception as e:
+                logger.error(f"Lightweight RAG error: {e}")
+        
+        # Fall back to standard RAG prompt
+        prompt = self.create_rag_prompt(query, context_chunks)
         response = self.generate_response(
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
-            stop=["Question:", "Context:", "\n\nQuestion:", "\n\nContext:"]
+            stop=["Question:", "Information:", "\n\nQuestion:", "\n\nInformation:"]
         )
         
         return response
     
     def is_available(self) -> bool:
-        """Check if LLM is available."""
-        return self.llm is not None
+        """Check if any LLM is available."""
+        return (
+            (self.lightweight_llm and self.lightweight_llm.is_available()) or
+            (self.llm is not None)
+        )
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the loaded model."""
+        if self.lightweight_llm and self.lightweight_llm.is_available():
+            return {
+                "type": "lightweight_transformers",
+                "model_name": self.lightweight_llm.model_name,
+                "device": self.lightweight_llm.device,
+                "available": True
+            }
+        elif self.llm:
+            return {
+                "type": "llama_cpp",
+                "model_path": self.model_path,
+                "available": True
+            }
+        else:
+            return {
+                "type": "fallback",
+                "available": False
+            }
 
 class RAGSystem:
     def __init__(self, document_processor, llm_interface):
@@ -261,7 +358,8 @@ class RAGSystem:
                 return {
                     "answer": "I couldn't find relevant information in the documents to answer your question.",
                     "sources": [],
-                    "confidence": 0.0
+                    "confidence": 0.0,
+                    "query": user_query
                 }
             
             # Generate answer using LLM
@@ -295,7 +393,7 @@ class RAGSystem:
 
 if __name__ == "__main__":
     # Example usage
-    llm = LLMInterface()
+    llm = LLMInterface(use_lightweight=True)
     
     # Test basic generation
     response = llm.generate_response("Hello, how are you?")
