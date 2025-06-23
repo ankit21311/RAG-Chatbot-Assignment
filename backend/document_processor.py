@@ -6,7 +6,14 @@ from pathlib import Path
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
-from langchain.document_loaders import PyPDFLoader, TextLoader
+
+# Updated imports for langchain
+try:
+    from langchain_community.document_loaders import PyPDFLoader, TextLoader
+except ImportError:
+    # Fallback for older langchain versions
+    from langchain.document_loaders import PyPDFLoader, TextLoader
+
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 

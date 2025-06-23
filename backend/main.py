@@ -8,8 +8,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-from document_processor import DocumentProcessor
-from llm_interface import LLMInterface, RAGSystem
+# Try to import our modules, with fallbacks
+try:
+    from document_processor import DocumentProcessor
+    from llm_interface import LLMInterface, RAGSystem
+except ImportError as e:
+    print(f"Import error: {e}")
+    print("Make sure you're running from the backend directory")
+    exit(1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,7 +66,7 @@ async def startup_event():
     
     # Initialize document processor
     try:
-        doc_processor = DocumentProcessor(chroma_db_path="./chroma_db")
+        doc_processor = DocumentProcessor(chroma_db_path="../chroma_db")
         logger.info("Document processor initialized")
     except Exception as e:
         logger.error(f"Failed to initialize document processor: {e}")
@@ -69,7 +75,7 @@ async def startup_event():
     # Initialize LLM interface
     try:
         # Look for model files in the models directory
-        models_dir = Path("./models")
+        models_dir = Path("../models")
         model_path = None
         
         if models_dir.exists():
@@ -81,7 +87,7 @@ async def startup_event():
         logger.info(f"LLM interface initialized (Model available: {llm_interface.is_available()})")
         
         if not llm_interface.is_available():
-            logger.warning("No local LLM model found. Download a GGUF model to ./models/ directory")
+            logger.warning("No local LLM model found. Using fallback responses.")
             
     except Exception as e:
         logger.error(f"Failed to initialize LLM interface: {e}")
@@ -100,6 +106,7 @@ async def root():
     return {
         "message": "RAG Chatbot API",
         "version": "1.0.0",
+        "status": "running",
         "endpoints": {
             "/chat": "POST - Send a message to the chatbot",
             "/status": "GET - Check system status",
@@ -111,41 +118,43 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "timestamp": str(Path(__file__).stat().st_mtime)}
+    return {"status": "healthy"}
 
-@app.get("/status", response_model=SystemStatus)
+@app.get("/status")
 async def get_status():
     """Get system status."""
-    if not doc_processor or not llm_interface:
-        raise HTTPException(status_code=503, detail="System not properly initialized")
-    
     # Get document count
     total_chunks = 0
     try:
-        if doc_processor.collection:
+        if doc_processor and doc_processor.collection:
             total_chunks = doc_processor.collection.count()
     except:
         total_chunks = 0
     
     # Get model info
     model_info = {
-        "model_available": llm_interface.is_available(),
-        "model_path": llm_interface.model_path,
+        "model_available": llm_interface.is_available() if llm_interface else False,
+        "model_path": llm_interface.model_path if llm_interface else None,
         "embedding_model": doc_processor.embedding_model_name if doc_processor else "unknown"
     }
     
-    return SystemStatus(
-        document_processor_ready=doc_processor is not None,
-        llm_ready=llm_interface.is_available(),
-        total_chunks=total_chunks,
-        model_info=model_info
-    )
+    return {
+        "document_processor_ready": doc_processor is not None,
+        "llm_ready": llm_interface.is_available() if llm_interface else False,
+        "total_chunks": total_chunks,
+        "model_info": model_info
+    }
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat(request: ChatRequest):
     """Main chat endpoint for RAG queries."""
     if not rag_system:
-        raise HTTPException(status_code=503, detail="RAG system not initialized")
+        return {
+            "answer": "RAG system not initialized. Please check the system status.",
+            "sources": [],
+            "confidence": 0.0,
+            "query": request.message
+        }
     
     try:
         # Process the query through RAG system
@@ -154,14 +163,19 @@ async def chat(request: ChatRequest):
             n_results=request.n_results
         )
         
-        return ChatResponse(**result)
+        return result
         
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+        return {
+            "answer": f"Sorry, I encountered an error: {str(e)}",
+            "sources": [],
+            "confidence": 0.0,
+            "query": request.message
+        }
 
 @app.post("/process-documents")
-async def process_documents(background_tasks: BackgroundTasks, documents_path: str = "./data/sample_docs"):
+async def process_documents(background_tasks: BackgroundTasks, documents_path: str = "../data/sample_docs"):
     """Process documents for RAG (runs in background)."""
     if not doc_processor:
         raise HTTPException(status_code=503, detail="Document processor not initialized")
