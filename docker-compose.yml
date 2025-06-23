@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  rag-chatbot:
+    build: .
+    ports:
+      - "8000:8000"  # FastAPI
+      - "8501:8501"  # Streamlit
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./chroma_db:/app/chroma_db
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
+
+  # Optional: Add a volume for persistent data
+volumes:
+  chroma_data:
+    driver: local
